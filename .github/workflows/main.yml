@@ -6,20 +6,20 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360  # GitHub Actions max timeout is 6 hours (360 mins)
+    timeout-minutes: 360  # Max duration (6 hours)
 
     steps:
       - name: Maximize Disk Space
         run: |
           Write-Host "Cleaning up unnecessary files to maximize storage..."
           
-          # Function for fast deletion using robocopy
           function Fast-Delete {
               param([string]$path)
               if (Test-Path $path) {
                   Write-Host "Fast-deleting: $path"
                   $emptyDir = New-Item -Path "$env:TEMP\empty" -ItemType Directory -Force
-                  robocopy $emptyDir $path /MIR /MT:64 /R:0 /W:0 /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+                  # Use Robocopy for speed, ignore exit codes (0-8 are success)
+                  try { robocopy $emptyDir $path /MIR /MT:64 /R:0 /W:0 /NFL /NDL /NJH /NJS /NC /NS /NP } catch {} 
                   Remove-Item $path -Force -Recurse -ErrorAction SilentlyContinue
                   Remove-Item $emptyDir -Force -Recurse -ErrorAction SilentlyContinue
               }
@@ -27,15 +27,9 @@ jobs:
 
           Fast-Delete "C:\android"
           Fast-Delete "C:\hostedtoolcache"
-          
-          $foldersToDelete = @(
-            "C:\Program Files\dotnet",
-            "C:\Program Files (x86)\Microsoft SDKs",
-            "C:\Program Files\Android"
-          )
-          foreach ($folder in $foldersToDelete) {
-            Fast-Delete $folder
-          }
+          Fast-Delete "C:\Program Files\dotnet"
+          Fast-Delete "C:\Program Files (x86)\Microsoft SDKs"
+          Fast-Delete "C:\Program Files\Android"
           
           Write-Host "Disk cleanup complete."
           Get-PSDrive C | Select-Object Used, Free, @{Name="Total";Expression={$_.Used+$_.Free}} | Format-Table -AutoSize
@@ -45,55 +39,37 @@ jobs:
           Write-Host "--- SYSTEM SPECIFICATIONS ---"
           $cpu = Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, MaxClockSpeed
           $ram = Get-CimInstance Win32_PhysicalMemory | Measure-Object Capacity -Sum | Select-Object @{Name="TotalGB";Expression={$_.Sum / 1GB}}
-          $gpu = Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion
           $os = Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version
           
-          Write-Host "CPU: $($cpu.Name) ($($cpu.NumberOfCores) Cores @ $($cpu.MaxClockSpeed)MHz)"
+          Write-Host "CPU: $($cpu.Name) ($($cpu.NumberOfCores) Cores)"
           Write-Host "RAM: $($ram.TotalGB) GB"
-          Write-Host "OS: $($os.Caption) ($($os.Version))"
-          
-          if ($gpu) {
-            Write-Host "GPU Detected: $($gpu.Name) (Driver: $($gpu.DriverVersion))"
-          } else {
-            Write-Host "No dedicated GPU detected (standard runner mode)."
-          }
+          Write-Host "OS: $($os.Caption)"
           
           Write-Host "--- NETWORK SPEED TEST ---"
-          # Simple speed test by downloading a large-ish file (100MB) from a fast CDN
           $testUrl = "https://speed.hetzner.de/100MB.bin"
           $sw = [Diagnostics.Stopwatch]::StartNew()
-          Invoke-WebRequest -Uri $testUrl -OutFile "$env:TEMP\speedtest.bin"
-          $sw.Stop()
-          $speed = (100 / $sw.Elapsed.TotalSeconds) * 8 # Mbps approx
-          Write-Host "Approximate Download Speed: $(([math]::Round($speed, 2))) Mbps"
-          Remove-Item "$env:TEMP\speedtest.bin" -Force
-
-      - name: Tuning for Max Performance
-        run: |
-          Write-Host "Adjusting Windows for Best Performance..."
-          # Set Power Plan to High Performance
-          $guid = (powercfg /getactivescheme).Split()[3]
-          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c # High Performance GUID
-          
-          # Visual Effects optimization (Best Performance)
-          # This usually requires registry changes for systemic effect
-          Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' -Name "VisualFXSetting" -Value 2
-          
-          Write-Host "Performance tuning complete."
+          try {
+            Invoke-WebRequest -Uri $testUrl -OutFile "$env:TEMP\speedtest.bin" -ErrorAction Stop
+            $sw.Stop()
+            $speed = (100 / $sw.Elapsed.TotalSeconds) * 8
+            Write-Host "Download Speed: $(([math]::Round($speed, 2))) Mbps"
+          } catch {
+            Write-Host "Speed test skipped due to connection fluctuation."
+          }
+          Remove-Item "$env:TEMP\speedtest.bin" -Force -ErrorAction SilentlyContinue
 
       - name: Configure Core RDP Settings
         run: |
+          # Enable RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          # Allow in Firewall
+          netsh advfirewall firewall set rule group="Remote Desktop" new enable=Yes
+          # Restart Service
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User
         run: |
-          $password = "MaxRDP_Pass_2024!" # Simpler fixed password for user convenience, or keep random
+          $password = "MaxRDP_Pass_2024!" 
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
@@ -102,39 +78,5 @@ jobs:
 
       - name: Install Tailscale
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
-
-      - name: Establish Tailscale Connection
-        run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-max-rdp
-          $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
-      - name: Connection Summary
-        run: |
-          Write-Host "`n=================================="
-          Write-Host "   MAX RDP CONNECTION INFO"
-          Write-Host "=================================="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $env:RDP_PASSWORD"
-          Write-Host "Time: 6 Hours Allowed"
-          Write-Host "==================================`n"
-
-      - name: Max Uptime Loop
-        run: |
-          $start = Get-Date
-          while ($true) {
-              $current = Get-Date
-              $elapsed = ($current - $start).TotalMinutes
-              if ($elapsed -ge 350) { # Stop just before 6-hour GitHub timeout
-                  Write-Host "Approaching maximum workflow time. Shutting down."
-                  break
-              }
-              Write-Host "[$(Get-Date)] RDP Active - Elapsed: $([math]::Round($elapsed, 0)) mins"
-              Start-Sleep -Seconds 300
-          }
+          # Download latest stable release
+          $tsUrl = "https
