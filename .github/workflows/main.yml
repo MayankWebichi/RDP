@@ -12,19 +12,31 @@ jobs:
       - name: Maximize Disk Space
         run: |
           Write-Host "Cleaning up unnecessary files to maximize storage..."
-          Remove-Item -Path "C:\android" -Recurse -ErrorAction SilentlyContinue
-          Remove-Item -Path "C:\hostedtoolcache" -Recurse -ErrorAction SilentlyContinue
-          # Delete extra Program Files if needed (careful with dependencies)
+          
+          # Function for fast deletion using robocopy
+          function Fast-Delete {
+              param([string]$path)
+              if (Test-Path $path) {
+                  Write-Host "Fast-deleting: $path"
+                  $emptyDir = New-Item -Path "$env:TEMP\empty" -ItemType Directory -Force
+                  robocopy $emptyDir $path /MIR /MT:64 /R:0 /W:0 /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
+                  Remove-Item $path -Force -Recurse -ErrorAction SilentlyContinue
+                  Remove-Item $emptyDir -Force -Recurse -ErrorAction SilentlyContinue
+              }
+          }
+
+          Fast-Delete "C:\android"
+          Fast-Delete "C:\hostedtoolcache"
+          
           $foldersToDelete = @(
             "C:\Program Files\dotnet",
             "C:\Program Files (x86)\Microsoft SDKs",
             "C:\Program Files\Android"
           )
           foreach ($folder in $foldersToDelete) {
-            if (Test-Path $folder) {
-              Remove-Item -Path $folder -Recurse -ErrorAction SilentlyContinue
-            }
+            Fast-Delete $folder
           }
+          
           Write-Host "Disk cleanup complete."
           Get-PSDrive C | Select-Object Used, Free, @{Name="Total";Expression={$_.Used+$_.Free}} | Format-Table -AutoSize
 
