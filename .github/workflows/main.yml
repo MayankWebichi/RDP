@@ -1,4 +1,4 @@
-name: Max RDP Optimization
+name: Max RDP Optimization (Fast Boot)
 
 on:
   workflow_dispatch:
@@ -6,65 +6,23 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360  # Max duration (6 hours)
+    timeout-minutes: 360
 
     steps:
-      - name: Maximize Disk Space
-        run: |
-          Write-Host "Cleaning up unnecessary files to maximize storage..."
-          
-          function Fast-Delete {
-              param([string]$path)
-              if (Test-Path $path) {
-                  Write-Host "Fast-deleting: $path"
-                  $emptyDir = New-Item -Path "$env:TEMP\empty" -ItemType Directory -Force
-                  # Use Robocopy for speed, ignore exit codes (0-8 are success)
-                  try { robocopy $emptyDir $path /MIR /MT:64 /R:0 /W:0 /NFL /NDL /NJH /NJS /NC /NS /NP } catch {} 
-                  Remove-Item $path -Force -Recurse -ErrorAction SilentlyContinue
-                  Remove-Item $emptyDir -Force -Recurse -ErrorAction SilentlyContinue
-              }
-          }
-
-          Fast-Delete "C:\android"
-          Fast-Delete "C:\hostedtoolcache"
-          Fast-Delete "C:\Program Files\dotnet"
-          Fast-Delete "C:\Program Files (x86)\Microsoft SDKs"
-          Fast-Delete "C:\Program Files\Android"
-          
-          Write-Host "Disk cleanup complete."
-          Get-PSDrive C | Select-Object Used, Free, @{Name="Total";Expression={$_.Used+$_.Free}} | Format-Table -AutoSize
-
       - name: Display System Specifications
         run: |
           Write-Host "--- SYSTEM SPECIFICATIONS ---"
-          $cpu = Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, MaxClockSpeed
+          $cpu = Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores
           $ram = Get-CimInstance Win32_PhysicalMemory | Measure-Object Capacity -Sum | Select-Object @{Name="TotalGB";Expression={$_.Sum / 1GB}}
-          $os = Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version
-          
           Write-Host "CPU: $($cpu.Name) ($($cpu.NumberOfCores) Cores)"
           Write-Host "RAM: $($ram.TotalGB) GB"
-          Write-Host "OS: $($os.Caption)"
-          
-          Write-Host "--- NETWORK SPEED TEST ---"
-          $testUrl = "https://speed.hetzner.de/100MB.bin"
-          $sw = [Diagnostics.Stopwatch]::StartNew()
-          try {
-            Invoke-WebRequest -Uri $testUrl -OutFile "$env:TEMP\speedtest.bin" -ErrorAction Stop
-            $sw.Stop()
-            $speed = (100 / $sw.Elapsed.TotalSeconds) * 8
-            Write-Host "Download Speed: $(([math]::Round($speed, 2))) Mbps"
-          } catch {
-            Write-Host "Speed test skipped due to connection fluctuation."
-          }
-          Remove-Item "$env:TEMP\speedtest.bin" -Force -ErrorAction SilentlyContinue
+          Get-PSDrive C | Select-Object Used, Free | Format-Table -AutoSize
 
       - name: Configure Core RDP Settings
         run: |
-          # Enable RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          # Allow in Firewall
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           netsh advfirewall firewall set rule group="Remote Desktop" new enable=Yes
-          # Restart Service
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User
@@ -78,5 +36,37 @@ jobs:
 
       - name: Install Tailscale
         run: |
-          # Download latest stable release
-          $tsUrl = "https
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        env:
+          TAILSCALE_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_KEY --hostname=gh-max-rdp
+          $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+      
+      - name: Connection Summary
+        run: |
+          Write-Host "`n=================================="
+          Write-Host "   MAX RDP CONNECTION INFO"
+          Write-Host "=================================="
+          Write-Host "IP: $env:TAILSCALE_IP"
+          Write-Host "User: RDP"
+          Write-Host "Pass: MaxRDP_Pass_2024!"
+          Write-Host "==================================`n"
+
+      - name: Max Uptime Loop
+        run: |
+          $start = Get-Date
+          while ($true) {
+              $current = Get-Date
+              $elapsed = ($current - $start).TotalMinutes
+              if ($elapsed -ge 350) { break }
+              Write-Host "[$(Get-Date)] RDP Active - Up for $([math]::Round($elapsed, 0)) mins"
+              Start-Sleep -Seconds 300
+          }
